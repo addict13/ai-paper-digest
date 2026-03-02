@@ -239,19 +239,15 @@ def translate_abstracts(papers: list[dict]) -> list[dict]:
             headers={"Content-Type": "application/json"},
         )
         translated = None
-        for attempt in range(3):  # ✅ 최대 3회 시도
-            try:
-                with urllib.request.urlopen(req, timeout=40) as r:
-                    resp = json.loads(r.read())
-                translated = resp["candidates"][0]["content"]["parts"][0]["text"].strip()
-                break
-            except Exception as e:
-                wait = (attempt + 1) * 60  # ✅ 60초, 120초, 180초 (충분한 대기)
-                print(f"    번역 실패 (시도 {attempt+1}/3): {e} → {wait}초 대기")
-                time.sleep(wait)
+        try:  # 1회만 시도 — 실패 시 원문 표시 (재시도 대기 없음)
+            with urllib.request.urlopen(req, timeout=40) as r:
+                resp = json.loads(r.read())
+            translated = resp["candidates"][0]["content"]["parts"][0]["text"].strip()
+        except Exception as e:
+            print(f"    번역 실패 (원문으로 대체): {e}")
 
         p["abstract_kr"] = translated  # None이면 원문 표시
-        time.sleep(5)  # ✅ 성공 후 대기는 짧게 (429는 재시도 대기로 처리)
+        time.sleep(5)  # 논문 간 5초 대기 (분당 12회 이내 유지)
 
     return papers
 
