@@ -39,11 +39,12 @@ GEMINI_URL = (
 # ══════════════════════════════════════════════
 def fetch_arxiv() -> list[dict]:
     papers, seen = [], set()
-    cutoff = (datetime.utcnow() - timedelta(days=30)).strftime("%Y%m%d")
+    cutoff = "20250101"  # 2025년 이후 논문만 수집
 
     for cat in ARXIV_CATEGORIES:
         for kw in ARXIV_KEYWORDS:
-            query = f"cat:{cat} AND all:{urllib.parse.quote(kw)}"
+            # 2705 CffcB9ac C804Ccb4B97c C778Cf54B529 (AND, Acf5Bc31 D3ecD568)
+            query = urllib.parse.quote(f"cat:{cat} AND all:{kw}")
             url = (
                 "https://export.arxiv.org/api/query?"
                 f"search_query={query}"
@@ -97,6 +98,7 @@ def fetch_semantic_scholar() -> list[dict]:
             "https://api.semanticscholar.org/graph/v1/paper/search?"
             f"query={urllib.parse.quote(q)}"
             "&fields=title,abstract,authors,year,url,citationCount"
+            "&year=2025-"
             "&limit=8"
         )
         for attempt in range(3):
@@ -107,6 +109,8 @@ def fetch_semantic_scholar() -> list[dict]:
 
                 for p in data.get("data", []):
                     if not p.get("abstract") or p["paperId"] in seen:
+                        continue
+                    if (p.get("year") or 0) < 2025:  # 2025년 이후만
                         continue
                     seen.add(p["paperId"])
                     citations = p.get("citationCount") or 0
@@ -144,21 +148,25 @@ def fetch_papers_with_code() -> list[dict]:
     queries = ["language model", "robotics", "reinforcement learning"]
 
     for q in queries:
+        # ✅ 올바른 파라미터 + Accept 헤더 추가
         url = (
             "https://paperswithcode.com/api/v1/papers/?"
             f"q={urllib.parse.quote(q)}"
-            "&ordering=-github_stars&items_per_page=5"
+            "&ordering=-stars&page_size=5"
         )
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "AI-Digest/1.0"})
+            req = urllib.request.Request(url, headers={
+                "User-Agent": "AI-Digest/1.0",
+                "Accept": "application/json",
+            })
             with urllib.request.urlopen(req, timeout=30) as r:
                 data = json.loads(r.read())
 
             for p in data.get("results", []):
-                if not p.get("abstract") or p["id"] in seen:
+                if not p.get("abstract") or str(p.get("id","")) in seen:
                     continue
-                seen.add(p["id"])
-                stars = p.get("github_stars") or 0
+                seen.add(str(p["id"]))
+                stars = p.get("stars") or p.get("github_stars") or 0
                 papers.append({
                     "source":     "Papers With Code",
                     "category":   "AI",
@@ -166,12 +174,12 @@ def fetch_papers_with_code() -> list[dict]:
                     "id":         str(p["id"]),
                     "title":      p.get("title", ""),
                     "abstract":   p.get("abstract", ""),
-                    "authors":    [],
+                    "authors":    [a.get("name","") for a in p.get("authors", [])][:4],
                     "url":        f"https://paperswithcode.com{p.get('url_abs', '')}",
                     "date":       (p.get("published") or "")[:10],
                     "citations":  0,
                     "stars":      stars,
-                    "popularity": stars,  # 스타수 = 인기도 점수
+                    "popularity": stars,
                 })
         except Exception as e:
             print(f"[PapersWithCode/{q}] 오류: {e}")
@@ -231,19 +239,19 @@ def translate_abstracts(papers: list[dict]) -> list[dict]:
             headers={"Content-Type": "application/json"},
         )
         translated = None
-        for attempt in range(2):  # 최대 2회 시도
+        for attempt in range(3):  # ✅ 최대 3회 시도
             try:
                 with urllib.request.urlopen(req, timeout=40) as r:
                     resp = json.loads(r.read())
                 translated = resp["candidates"][0]["content"]["parts"][0]["text"].strip()
                 break
             except Exception as e:
-                wait = (attempt + 1) * 20
-                print(f"    번역 실패 (시도 {attempt+1}/2): {e} → {wait}초 대기")
+                wait = (attempt + 1) * 60  # ✅ 60초, 120초, 180초 (충분한 대기)
+                print(f"    번역 실패 (시도 {attempt+1}/3): {e} → {wait}초 대기")
                 time.sleep(wait)
 
         p["abstract_kr"] = translated  # None이면 원문 표시
-        time.sleep(20)  # 분당 15회 제한 → 20초 간격으로 안전하게
+        time.sleep(5)  # ✅ 성공 후 대기는 짧게 (429는 재시도 대기로 처리)
 
     return papers
 
