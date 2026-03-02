@@ -37,21 +37,24 @@ GEMINI_URL = (
 def fetch_arxiv() -> list[dict]:
     papers, seen = [], set()
     for cat in ARXIV_CATEGORIES:
+        # ✅ http → https 로 변경 (GitHub Actions 환경에서 http 차단됨)
         url = (
-            "http://export.arxiv.org/api/query?"
+            "https://export.arxiv.org/api/query?"
             f"search_query={urllib.parse.quote('cat:' + cat)}"
-            "&sortBy=submittedDate&sortOrder=descending&max_results=40"
+            "&sortBy=submittedDate&sortOrder=descending&max_results=20"
         )
         try:
-            with urllib.request.urlopen(url, timeout=30) as r:
+            req = urllib.request.Request(url, headers={"User-Agent": "AI-Digest/1.0"})
+            with urllib.request.urlopen(req, timeout=30) as r:
                 root = ET.fromstring(r.read())
             ns = {"a": "http://www.w3.org/2005/Atom"}
-            cutoff = (datetime.utcnow() - timedelta(days=2)).strftime("%Y%m%d")
+            # ✅ 날짜 필터 완화: 최근 7일 이내 논문 수집 (주말·공휴일 고려)
+            cutoff = (datetime.utcnow() - timedelta(days=7)).strftime("%Y%m%d")
 
             for entry in root.findall("a:entry", ns):
                 pub = entry.find("a:published", ns).text[:10].replace("-", "")
                 if pub < cutoff:
-                    break
+                    continue
                 pid = entry.find("a:id", ns).text.split("/abs/")[-1]
                 if pid in seen:
                     continue
@@ -68,7 +71,7 @@ def fetch_arxiv() -> list[dict]:
                 })
         except Exception as e:
             print(f"[arXiv/{cat}] 오류: {e}")
-        time.sleep(1)
+        time.sleep(3)  # arXiv 요청 간격 준수
     return papers
 
 
@@ -84,27 +87,32 @@ def fetch_semantic_scholar() -> list[dict]:
             f"query={urllib.parse.quote(q)}"
             "&fields=title,abstract,authors,year,url&limit=8"
         )
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "AI-Digest/1.0"})
-            with urllib.request.urlopen(req, timeout=30) as r:
-                data = json.loads(r.read())
-            for p in data.get("data", []):
-                if not p.get("abstract") or p["paperId"] in seen:
-                    continue
-                seen.add(p["paperId"])
-                papers.append({
-                    "source":   "Semantic Scholar",
-                    "category": "AI",
-                    "id":       p["paperId"],
-                    "title":    p.get("title", ""),
-                    "abstract": p.get("abstract", "")[:800],
-                    "authors":  [a["name"] for a in p.get("authors", [])][:4],
-                    "url":      p.get("url") or f"https://www.semanticscholar.org/paper/{p['paperId']}",
-                    "date":     str(p.get("year", datetime.now().year)),
-                })
-        except Exception as e:
-            print(f"[SemanticScholar] 오류: {e}")
-        time.sleep(1)
+        # ✅ 429 발생 시 최대 3회 재시도 (간격을 늘려가며)
+        for attempt in range(3):
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "AI-Digest/1.0"})
+                with urllib.request.urlopen(req, timeout=30) as r:
+                    data = json.loads(r.read())
+                for p in data.get("data", []):
+                    if not p.get("abstract") or p["paperId"] in seen:
+                        continue
+                    seen.add(p["paperId"])
+                    papers.append({
+                        "source":   "Semantic Scholar",
+                        "category": "AI",
+                        "id":       p["paperId"],
+                        "title":    p.get("title", ""),
+                        "abstract": p.get("abstract", "")[:800],
+                        "authors":  [a["name"] for a in p.get("authors", [])][:4],
+                        "url":      p.get("url") or f"https://www.semanticscholar.org/paper/{p['paperId']}",
+                        "date":     str(p.get("year", datetime.now().year)),
+                    })
+                break  # 성공하면 재시도 루프 탈출
+            except Exception as e:
+                wait = (attempt + 1) * 10  # 10초, 20초, 30초
+                print(f"[SemanticScholar] 오류 (시도 {attempt+1}/3): {e} → {wait}초 후 재시도")
+                time.sleep(wait)
+        time.sleep(5)  # 쿼리 간 간격
     return papers[:5]
 
 
@@ -142,14 +150,23 @@ Reply ONLY with valid JSON (no markdown fences, no extra text):
             data=payload,
             headers={"Content-Type": "application/json"},
         )
-        try:
-            with urllib.request.urlopen(req, timeout=40) as r:
-                resp = json.loads(r.read())
-            raw = resp["candidates"][0]["content"]["parts"][0]["text"]
-            raw = raw[raw.find("{"):raw.rfind("}")+1]
-            summary = json.loads(raw)
-        except Exception as e:
-            print(f"    요약 실패: {e}")
+
+        # ✅ 429 발생 시 최대 3회 재시도 (간격을 늘려가며)
+        summary = None
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(req, timeout=40) as r:
+                    resp = json.loads(r.read())
+                raw = resp["candidates"][0]["content"]["parts"][0]["text"]
+                raw = raw[raw.find("{"):raw.rfind("}")+1]
+                summary = json.loads(raw)
+                break  # 성공
+            except Exception as e:
+                wait = (attempt + 1) * 15  # 15초, 30초, 45초
+                print(f"    요약 실패 (시도 {attempt+1}/3): {e} → {wait}초 후 재시도")
+                time.sleep(wait)
+
+        if summary is None:
             summary = {
                 "title_kr": p["title"],
                 "summary_kr": p["abstract"][:200] + "…",
@@ -160,7 +177,8 @@ Reply ONLY with valid JSON (no markdown fences, no extra text):
             }
 
         results.append({**p, **summary})
-        time.sleep(4)   # 무료 티어: 분당 15회 제한 → 4초 간격으로 여유있게 유지
+        # ✅ 무료 티어 분당 15회 제한 → 10초 간격 (여유있게)
+        time.sleep(10)
 
     return results
 
