@@ -3,8 +3,8 @@
 AI Paper Daily Digest
 ─────────────────────
 소스:      arXiv (카테고리 + 키워드) + Semantic Scholar (인용수 기준)
-           + Papers With Code (GitHub 스타수 기준)
-인기도:    Semantic Scholar 인용수 + Papers With Code GitHub 스타수
+           + Hugging Face Papers (트렌딩 기준)
+인기도:    Semantic Scholar 인용수 + Hugging Face 추천수
 발송:      Gmail SMTP
 비용:      $0 완전 무료
 """
@@ -101,38 +101,34 @@ def fetch_semantic_scholar() -> list[dict]:
             "&year=2025-"
             "&limit=8"
         )
-        for attempt in range(3):
-            try:
-                req = urllib.request.Request(url, headers={"User-Agent": "AI-Digest/1.0"})
-                with urllib.request.urlopen(req, timeout=30) as r:
-                    data = json.loads(r.read())
+        try:  # 1회만 시도 — 실패 시 해당 쿼리 건너뜀
+            req = urllib.request.Request(url, headers={"User-Agent": "AI-Digest/1.0"})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                data = json.loads(r.read())
 
-                for p in data.get("data", []):
-                    if not p.get("abstract") or p["paperId"] in seen:
-                        continue
-                    if (p.get("year") or 0) < 2025:  # 2025년 이후만
-                        continue
-                    seen.add(p["paperId"])
-                    citations = p.get("citationCount") or 0
-                    papers.append({
-                        "source":     "Semantic Scholar",
-                        "category":   "AI",
-                        "keyword":    q,
-                        "id":         p["paperId"],
-                        "title":      p.get("title", ""),
-                        "abstract":   p.get("abstract", ""),
-                        "authors":    [a["name"] for a in p.get("authors", [])][:4],
-                        "url":        p.get("url") or f"https://www.semanticscholar.org/paper/{p['paperId']}",
-                        "date":       str(p.get("year", datetime.now().year)),
-                        "citations":  citations,
-                        "stars":      0,
-                        "popularity": citations,  # 인용수 = 인기도 점수
-                    })
-                break
-            except Exception as e:
-                wait = (attempt + 1) * 10
-                print(f"[SemanticScholar] 오류 (시도 {attempt+1}/3): {e} → {wait}초 후 재시도")
-                time.sleep(wait)
+            for p in data.get("data", []):
+                if not p.get("abstract") or p["paperId"] in seen:
+                    continue
+                if (p.get("year") or 0) < 2025:  # 2025년 이후만
+                    continue
+                seen.add(p["paperId"])
+                citations = p.get("citationCount") or 0
+                papers.append({
+                    "source":     "Semantic Scholar",
+                    "category":   "AI",
+                    "keyword":    q,
+                    "id":         p["paperId"],
+                    "title":      p.get("title", ""),
+                    "abstract":   p.get("abstract", ""),
+                    "authors":    [a["name"] for a in p.get("authors", [])][:4],
+                    "url":        p.get("url") or f"https://www.semanticscholar.org/paper/{p['paperId']}",
+                    "date":       str(p.get("year", datetime.now().year)),
+                    "citations":  citations,
+                    "stars":      0,
+                    "popularity": citations,
+                })
+        except Exception as e:
+            print(f"[SemanticScholar/{q}] 오류: {e} → 건너뜀")
         time.sleep(3)
 
     # 인용수 내림차순 정렬 후 상위 반환
@@ -141,53 +137,47 @@ def fetch_semantic_scholar() -> list[dict]:
 
 
 # ══════════════════════════════════════════════
-#  3. Papers With Code — GitHub 스타수 기준 인기 논문
+#  3. Hugging Face Papers — 트렌딩 논문 (안정적, 무료)
 # ══════════════════════════════════════════════
-def fetch_papers_with_code() -> list[dict]:
+def fetch_hf_papers() -> list[dict]:
+    """Hugging Face Daily Papers — 커뮤니티 추천 기반 트렌딩 논문"""
     papers, seen = [], set()
-    queries = ["language model", "robotics", "reinforcement learning"]
+    url = "https://huggingface.co/api/daily_papers?limit=10"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "AI-Digest/1.0"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            data = json.loads(r.read())
 
-    for q in queries:
-        # ✅ 올바른 파라미터 + Accept 헤더 추가
-        url = (
-            "https://paperswithcode.com/api/v1/papers/?"
-            f"q={urllib.parse.quote(q)}"
-            "&ordering=-stars&page_size=5"
-        )
-        try:
-            req = urllib.request.Request(url, headers={
-                "User-Agent": "AI-Digest/1.0",
-                "Accept": "application/json",
+        for item in data:
+            p = item.get("paper", {})
+            pid = p.get("id", "")
+            if not p.get("summary") or pid in seen:
+                continue
+            # 2025년 이후만
+            pub = (p.get("publishedAt") or "")[:10].replace("-", "")
+            if pub and pub < "20250101":
+                continue
+            seen.add(pid)
+            upvotes = item.get("numComments", 0) + item.get("totalScore", 0)
+            papers.append({
+                "source":     "Hugging Face",
+                "category":   "AI",
+                "keyword":    "",
+                "id":         pid,
+                "title":      p.get("title", ""),
+                "abstract":   p.get("summary", ""),
+                "authors":    [a.get("name","") for a in p.get("authors", [])][:4],
+                "url":        f"https://huggingface.co/papers/{pid}",
+                "date":       (p.get("publishedAt") or "")[:10],
+                "citations":  0,
+                "stars":      upvotes,
+                "popularity": upvotes,
             })
-            with urllib.request.urlopen(req, timeout=30) as r:
-                data = json.loads(r.read())
+    except Exception as e:
+        print(f"[HuggingFace] 오류: {e} → 건너뜀")
 
-            for p in data.get("results", []):
-                if not p.get("abstract") or str(p.get("id","")) in seen:
-                    continue
-                seen.add(str(p["id"]))
-                stars = p.get("stars") or p.get("github_stars") or 0
-                papers.append({
-                    "source":     "Papers With Code",
-                    "category":   "AI",
-                    "keyword":    q,
-                    "id":         str(p["id"]),
-                    "title":      p.get("title", ""),
-                    "abstract":   p.get("abstract", ""),
-                    "authors":    [a.get("name","") for a in p.get("authors", [])][:4],
-                    "url":        f"https://paperswithcode.com{p.get('url_abs', '')}",
-                    "date":       (p.get("published") or "")[:10],
-                    "citations":  0,
-                    "stars":      stars,
-                    "popularity": stars,
-                })
-        except Exception as e:
-            print(f"[PapersWithCode/{q}] 오류: {e}")
-        time.sleep(2)
-
-    # 스타수 내림차순 정렬 후 상위 반환
-    papers.sort(key=lambda x: x["stars"], reverse=True)
-    return papers[:4]
+    papers.sort(key=lambda x: x["popularity"], reverse=True)
+    return papers[:5]
 
 
 # ══════════════════════════════════════════════
@@ -260,7 +250,7 @@ def build_html(papers: list[dict]) -> str:
     source_color = {
         "arXiv":             "#1a73e8",
         "Semantic Scholar":  "#0f9d58",
-        "Papers With Code":  "#f4a100",
+        "Hugging Face":      "#ff9d00",
     }
 
     cards = ""
@@ -340,7 +330,7 @@ def build_html(papers: list[dict]) -> str:
   </div>
   {cards}
   <div style="text-align:center;padding:18px;font-size:12px;color:#aaa;line-height:1.8;">
-    🔬 arXiv (cs.AI · cs.LG · cs.RO) · Semantic Scholar · Papers With Code<br>
+    🔬 arXiv · Semantic Scholar · Hugging Face Papers<br>
     GitHub Actions 무료 자동화 · 매일 오전 7시 KST
   </div>
 </div>
@@ -378,8 +368,8 @@ def main():
     scholar = fetch_semantic_scholar()
     print(f"   → {len(scholar)}편\n")
 
-    print("📡 [3/3] Papers With Code 수집 중 (GitHub 스타수 기준)...")
-    pwc = fetch_papers_with_code()
+    print("📡 [3/3] Hugging Face 트렌딩 논문 수집 중...")
+    pwc = fetch_hf_papers()
     print(f"   → {len(pwc)}편\n")
 
     ranked = rank_papers(arxiv, scholar, pwc)
